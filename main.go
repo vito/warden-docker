@@ -11,13 +11,17 @@ import (
 	"syscall"
 
 	"github.com/cloudfoundry-incubator/garden/server"
+	"github.com/cloudfoundry/gunk/command_runner/linux_command_runner"
+	"github.com/dotcloud/docker/runtime/graphdriver"
+	_ "github.com/dotcloud/docker/runtime/graphdriver/aufs"
+	_ "github.com/dotcloud/docker/runtime/graphdriver/vfs"
+
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/container_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/network_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/port_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/quota_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/uid_pool"
-	"github.com/cloudfoundry/gunk/command_runner/linux_command_runner"
 )
 
 var listenNetwork = flag.String(
@@ -159,10 +163,16 @@ func main() {
 		quotaManager.Disable()
 	}
 
+	graph, err := graphdriver.New("/var/lib/docker")
+	if err != nil {
+		log.Fatalln("error constructing graph driver:", err)
+	}
+
 	pool := container_pool.New(
 		*binPath,
 		*depotPath,
 		*rootFSPath,
+		graph,
 		uidPool,
 		networkPool,
 		portPool,
