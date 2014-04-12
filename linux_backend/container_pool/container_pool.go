@@ -14,13 +14,15 @@ import (
 	"time"
 
 	"github.com/cloudfoundry-incubator/garden/backend"
+	"github.com/cloudfoundry/gunk/command_runner"
+	"github.com/dotcloud/docker/runtime/graphdriver"
+
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/bandwidth_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/cgroups_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/network_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/quota_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/uid_pool"
-	"github.com/cloudfoundry/gunk/command_runner"
 )
 
 type LinuxContainerPool struct {
@@ -30,6 +32,8 @@ type LinuxContainerPool struct {
 
 	denyNetworks  []string
 	allowNetworks []string
+
+	graph graphdriver.Driver
 
 	uidPool     uid_pool.UIDPool
 	networkPool network_pool.NetworkPool
@@ -42,8 +46,11 @@ type LinuxContainerPool struct {
 	containerIDs chan string
 }
 
+const imagePrefix = "image:"
+
 func New(
 	binPath, depotPath, rootFSPath string,
+	graph graphdriver.Driver,
 	uidPool uid_pool.UIDPool,
 	networkPool network_pool.NetworkPool,
 	portPool linux_backend.PortPool,
@@ -58,6 +65,8 @@ func New(
 
 		allowNetworks: allowNetworks,
 		denyNetworks:  denyNetworks,
+
+		graph: graph,
 
 		uidPool:     uidPool,
 		networkPool: networkPool,
@@ -173,6 +182,27 @@ func (p *LinuxContainerPool) Create(spec backend.ContainerSpec) (linux_backend.C
 		handle = spec.Handle
 	}
 
+	rootFSPath := p.rootFSPath
+	rootFSRaw := false
+
+	if strings.HasPrefix(spec.RootFSPath, imagePrefix) {
+		imageID := spec.RootFSPath[len(imagePrefix):]
+
+		err := p.graph.Create(id, imageID, "")
+		if err != nil {
+			return nil, err
+		}
+
+		rootFSPath, err = p.graph.Get(id)
+		if err != nil {
+			return nil, err
+		}
+
+		rootFSRaw = true
+	} else if spec.RootFSPath != "" {
+		rootFSPath = spec.RootFSPath
+	}
+
 	container := linux_backend.NewLinuxContainer(
 		id,
 		handle,
@@ -192,7 +222,8 @@ func (p *LinuxContainerPool) Create(spec backend.ContainerSpec) (linux_backend.C
 		Args: []string{containerPath},
 		Env: []string{
 			"id=" + container.ID(),
-			"rootfs_path=" + p.rootFSPath,
+			"rootfs_path=" + rootFSPath,
+			fmt.Sprintf("rootfs_raw=%v", rootFSRaw),
 			fmt.Sprintf("user_uid=%d", uid),
 			fmt.Sprintf("network_host_ip=%s", network.HostIP()),
 			fmt.Sprintf("network_container_ip=%s", network.ContainerIP()),
@@ -289,6 +320,13 @@ func (p *LinuxContainerPool) Restore(snapshot io.Reader) (linux_backend.Containe
 
 func (p *LinuxContainerPool) Destroy(container linux_backend.Container) error {
 	err := p.destroy(container.ID())
+	if err != nil {
+		return err
+	}
+
+	p.graph.Put(container.ID())
+
+	err = p.graph.Remove(container.ID())
 	if err != nil {
 		return err
 	}
