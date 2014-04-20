@@ -17,11 +17,11 @@ import (
 	_ "github.com/dotcloud/docker/runtime/graphdriver/vfs"
 
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend"
-	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/container_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/network_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/port_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/quota_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/uid_pool"
+	"github.com/vito/warden-docker/container_pool"
 )
 
 var listenNetwork = flag.String(
