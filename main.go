@@ -12,9 +12,11 @@ import (
 
 	"github.com/cloudfoundry-incubator/garden/server"
 	"github.com/cloudfoundry/gunk/command_runner/linux_command_runner"
-	"github.com/dotcloud/docker/runtime/graphdriver"
-	_ "github.com/dotcloud/docker/runtime/graphdriver/aufs"
-	_ "github.com/dotcloud/docker/runtime/graphdriver/vfs"
+	"github.com/dotcloud/docker/daemon/graphdriver"
+	_ "github.com/dotcloud/docker/daemon/graphdriver/aufs"
+	_ "github.com/dotcloud/docker/daemon/graphdriver/vfs"
+	"github.com/dotcloud/docker/graph"
+	"github.com/dotcloud/docker/registry"
 
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/network_pool"
@@ -22,6 +24,7 @@ import (
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/quota_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/uid_pool"
 	"github.com/vito/warden-docker/container_pool"
+	"github.com/vito/warden-docker/container_pool/repository_fetcher"
 )
 
 var listenNetwork = flag.String(
@@ -120,6 +123,18 @@ var allowNetworks = flag.String(
 	"CIDR blocks representing IPs to whitelist",
 )
 
+var graphRoot = flag.String(
+	"graph",
+	"/var/lib/warden-docker-graph",
+	"docker image graph",
+)
+
+var dockerRegistry = flag.String(
+	"registry",
+	registry.IndexServerAddress(),
+	"docker registry API endpoint",
+)
+
 func main() {
 	flag.Parse()
 
@@ -163,16 +178,27 @@ func main() {
 		quotaManager.Disable()
 	}
 
-	graph, err := graphdriver.New("/var/lib/docker")
+	graphDriver, err := graphdriver.New(*graphRoot)
 	if err != nil {
 		log.Fatalln("error constructing graph driver:", err)
+	}
+
+	graph, err := graph.NewGraph(*graphRoot, graphDriver)
+	if err != nil {
+		log.Fatalln("error constructing graph:", err)
+	}
+
+	reg, err := registry.NewRegistry(nil, nil, *dockerRegistry)
+	if err != nil {
+		log.Fatalln(err)
 	}
 
 	pool := container_pool.New(
 		*binPath,
 		*depotPath,
 		*rootFSPath,
-		graph,
+		repository_fetcher.New(reg, graph),
+		graphDriver,
 		uidPool,
 		networkPool,
 		portPool,

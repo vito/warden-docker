@@ -15,7 +15,7 @@ import (
 
 	"github.com/cloudfoundry-incubator/garden/warden"
 	"github.com/cloudfoundry/gunk/command_runner"
-	"github.com/dotcloud/docker/runtime/graphdriver"
+	"github.com/dotcloud/docker/daemon/graphdriver"
 
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/bandwidth_manager"
@@ -23,6 +23,8 @@ import (
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/network_pool"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/quota_manager"
 	"github.com/cloudfoundry-incubator/warden-linux/linux_backend/uid_pool"
+
+	"github.com/vito/warden-docker/container_pool/repository_fetcher"
 )
 
 type LinuxContainerPool struct {
@@ -33,7 +35,8 @@ type LinuxContainerPool struct {
 	denyNetworks  []string
 	allowNetworks []string
 
-	graph graphdriver.Driver
+	repoFetcher repository_fetcher.RepositoryFetcher
+	graphDriver graphdriver.Driver
 
 	uidPool     uid_pool.UIDPool
 	networkPool network_pool.NetworkPool
@@ -50,6 +53,7 @@ const imagePrefix = "image:"
 
 func New(
 	binPath, depotPath, rootFSPath string,
+	repoFetcher repository_fetcher.RepositoryFetcher,
 	graph graphdriver.Driver,
 	uidPool uid_pool.UIDPool,
 	networkPool network_pool.NetworkPool,
@@ -66,7 +70,8 @@ func New(
 		allowNetworks: allowNetworks,
 		denyNetworks:  denyNetworks,
 
-		graph: graph,
+		repoFetcher: repoFetcher,
+		graphDriver: graph,
 
 		uidPool:     uidPool,
 		networkPool: networkPool,
@@ -186,14 +191,26 @@ func (p *LinuxContainerPool) Create(spec warden.ContainerSpec) (linux_backend.Co
 	rootFSRaw := false
 
 	if strings.HasPrefix(spec.RootFSPath, imagePrefix) {
-		imageID := spec.RootFSPath[len(imagePrefix):]
+		repoSegments := strings.SplitN(spec.RootFSPath[len(imagePrefix):], ":", 2)
 
-		err := p.graph.Create(id, imageID, "")
+		repoName := repoSegments[0]
+
+		tag := "latest"
+		if len(repoSegments) >= 2 {
+			tag = repoSegments[1]
+		}
+
+		imageID, err := p.repoFetcher.Fetch(repoName, tag)
 		if err != nil {
 			return nil, err
 		}
 
-		rootFSPath, err = p.graph.Get(id)
+		err = p.graphDriver.Create(id, imageID, "")
+		if err != nil {
+			return nil, err
+		}
+
+		rootFSPath, err = p.graphDriver.Get(id)
 		if err != nil {
 			return nil, err
 		}
@@ -324,9 +341,9 @@ func (p *LinuxContainerPool) Destroy(container linux_backend.Container) error {
 		return err
 	}
 
-	p.graph.Put(container.ID())
+	p.graphDriver.Put(container.ID())
 
-	err = p.graph.Remove(container.ID())
+	err = p.graphDriver.Remove(container.ID())
 	if err != nil {
 		return err
 	}
