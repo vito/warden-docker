@@ -1,4 +1,5 @@
 all:
+	mkdir -p skeleton/bin
 	cd src && make clean all
 	cp src/wsh/wshd skeleton/bin
 	cp src/wsh/wsh skeleton/bin
