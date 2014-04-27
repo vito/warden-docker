@@ -3,6 +3,7 @@ package repository_fetcher
 import (
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/dotcloud/docker/archive"
 	"github.com/dotcloud/docker/image"
@@ -42,6 +43,8 @@ func New(registry Registry, graph Graph) RepositoryFetcher {
 }
 
 func (fetcher *DockerRepositoryFetcher) Fetch(repoName string, tag string) (string, error) {
+	log.Println("fetching", repoName+":"+tag)
+
 	repoData, err := fetcher.registry.GetRepositoryData(repoName)
 	if err != nil {
 		return "", err
@@ -60,6 +63,7 @@ func (fetcher *DockerRepositoryFetcher) Fetch(repoName string, tag string) (stri
 	token := repoData.Tokens
 
 	for _, endpoint := range repoData.Endpoints {
+		log.Println("trying endpoint", endpoint, "for", imgID)
 		err = fetcher.fetchFromEndpoint(endpoint, imgID, token)
 		if err == nil {
 			return imgID, nil
@@ -79,6 +83,7 @@ func (fetcher *DockerRepositoryFetcher) fetchFromEndpoint(endpoint string, imgID
 		id := history[i]
 
 		if fetcher.graph.Exists(id) {
+			log.Println("already exists:", id)
 			continue
 		}
 
@@ -98,6 +103,8 @@ func (fetcher *DockerRepositoryFetcher) fetchFromEndpoint(endpoint string, imgID
 		}
 
 		defer layer.Close()
+
+		log.Println("downloading layer:", id)
 
 		err = fetcher.graph.Register(imgJSON, layer, img)
 		if err != nil {
