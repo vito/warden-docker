@@ -1,31 +1,28 @@
-package matchers_test
+package gexec_test
 
 import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
+
 	"testing"
 )
 
-type myStringer struct {
-	a string
-}
+var fireflyPath string
 
-func (s *myStringer) String() string {
-	return s.a
-}
+func TestGexec(t *testing.T) {
+	BeforeSuite(func() {
+		var err error
+		fireflyPath, err = gexec.Build("./_fixture/firefly")
+		Ω(err).ShouldNot(HaveOccurred())
+	})
 
-type StringAlias string
+	AfterSuite(func() {
+		gexec.CleanupBuildArtifacts()
+	})
 
-type myCustomType struct {
-	s   string
-	n   int
-	f   float32
-	arr []string
-}
-
-func Test(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Gomega")
+	RunSpecs(t, "Gexec Suite")
 }
 
 func interceptFailures(f func()) []string {
