@@ -205,12 +205,12 @@ func (p *LinuxContainerPool) Create(spec warden.ContainerSpec) (linux_backend.Co
 			return nil, err
 		}
 
-		err = p.graphDriver.Create(id, imageID, "")
+		err = p.graphDriver.Create(id, imageID)
 		if err != nil {
 			return nil, err
 		}
 
-		rootFSPath, err = p.graphDriver.Get(id)
+		rootFSPath, err = p.graphDriver.Get(id, "")
 		if err != nil {
 			return nil, err
 		}

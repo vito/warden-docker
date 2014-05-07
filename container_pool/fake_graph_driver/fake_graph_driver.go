@@ -25,9 +25,8 @@ type FakeGraphDriver struct {
 }
 
 type CreatedGraph struct {
-	ID         string
-	Parent     string
-	MountLabel string
+	ID     string
+	Parent string
 }
 
 func New() *FakeGraphDriver {
@@ -40,7 +39,7 @@ func (graph *FakeGraphDriver) String() string {
 	return "fake"
 }
 
-func (graph *FakeGraphDriver) Create(id string, parent string, mountLabel string) error {
+func (graph *FakeGraphDriver) Create(id string, parent string) error {
 	if graph.CreateError != nil {
 		return graph.CreateError
 	}
@@ -48,9 +47,8 @@ func (graph *FakeGraphDriver) Create(id string, parent string, mountLabel string
 	graph.Lock()
 
 	graph.created = append(graph.created, CreatedGraph{
-		ID:         id,
-		Parent:     parent,
-		MountLabel: mountLabel,
+		ID:     id,
+		Parent: parent,
 	})
 
 	graph.Unlock()
@@ -94,7 +92,7 @@ func (graph *FakeGraphDriver) Removed() []string {
 	return removed
 }
 
-func (graph *FakeGraphDriver) Get(id string) (string, error) {
+func (graph *FakeGraphDriver) Get(id string, mountLabel string) (string, error) {
 	if graph.GetError != nil {
 		return "", graph.GetError
 	}

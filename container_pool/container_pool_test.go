@@ -202,9 +202,8 @@ var _ = Describe("Container pool", func() {
 
 				Expect(fakeGraphDriver.Created()).To(ContainElement(
 					fake_graph_driver.CreatedGraph{
-						ID:         container.Handle(),
-						Parent:     "some-image-id",
-						MountLabel: "",
+						ID:     container.Handle(),
+						Parent: "some-image-id",
 					},
 				))
 
