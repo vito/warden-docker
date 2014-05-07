@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -683,7 +684,7 @@ var _ = Describe("Linux containers", func() {
 			BeforeEach(func() {
 				setupSuccessfulSpawn()
 
-				fakeRunner.WhenRunning(
+				fakeRunner.WhenWaitingFor(
 					fake_command_runner.CommandSpec{
 						Path: "/depot/some-id/bin/iomux-link",
 					}, func(*exec.Cmd) error {
@@ -731,47 +732,54 @@ var _ = Describe("Linux containers", func() {
 		})
 	})
 
-	Describe("Copying in", func() {
-		It("executes rsync from src into dst via wsh --rsh", func() {
-			err := container.CopyIn("/src", "/some/dst")
-			Expect(err).ToNot(HaveOccurred())
+	Describe("Streaming data in", func() {
+		var source io.Reader
 
-			Expect(fakeRunner).To(HaveExecutedSerially(
+		BeforeEach(func() {
+			source = strings.NewReader("the-tar-content")
+		})
+
+		It("streams the input to tar xf in the container", func(done Done) {
+			fakeRunner.WhenRunning(
 				fake_command_runner.CommandSpec{
 					Path: "/depot/some-id/bin/wsh",
 					Args: []string{
 						"--socket", "/depot/some-id/run/wshd.sock",
 						"--user", "vcap",
-						"mkdir", "-p", "/some",
+						"bash", "-c", `mkdir -p /some/directory/dst && tar xf - -C /some/directory/dst`,
 					},
 				},
-				fake_command_runner.CommandSpec{
-					Path: "rsync",
-					Args: []string{
-						"-e",
-						"/depot/some-id/bin/wsh --socket /depot/some-id/run/wshd.sock --rsh",
-						"-r",
-						"-p",
-						"--links",
-						"/src",
-						"vcap@container:/some/dst",
-					},
+				func(cmd *exec.Cmd) error {
+					go func() {
+						defer GinkgoRecover()
+
+						bytes, err := ioutil.ReadAll(cmd.Stdin)
+						Expect(err).ToNot(HaveOccurred())
+
+						Expect(string(bytes)).To(Equal("the-tar-content"))
+
+						close(done)
+					}()
+
+					return nil
 				},
-			))
+			)
+
+			writer, err := container.StreamIn("/some/directory/dst")
+
+			writer.Write([]byte("the-tar-content"))
+			writer.Close()
+
+			Expect(err).ToNot(HaveOccurred())
 		})
 
-		Context("when making the parent directory fails", func() {
+		Context("when executing the command fails", func() {
 			disaster := errors.New("oh no!")
 
 			BeforeEach(func() {
 				fakeRunner.WhenRunning(
 					fake_command_runner.CommandSpec{
 						Path: "/depot/some-id/bin/wsh",
-						Args: []string{
-							"--socket", "/depot/some-id/run/wshd.sock",
-							"--user", "vcap",
-							"mkdir", "-p", "/some",
-						},
 					}, func(*exec.Cmd) error {
 						return disaster
 					},
@@ -779,128 +787,77 @@ var _ = Describe("Linux containers", func() {
 			})
 
 			It("returns the error", func() {
-				err := container.CopyIn("/src", "/some/dst")
+				_, err := container.StreamIn("/some/dst")
 				Expect(err).To(Equal(disaster))
-			})
-		})
-
-		Context("when rsync fails", func() {
-			nastyError := errors.New("oh no!")
-
-			BeforeEach(func() {
-				fakeRunner.WhenRunning(
-					fake_command_runner.CommandSpec{
-						Path: "rsync",
-					}, func(*exec.Cmd) error {
-						return nastyError
-					},
-				)
-			})
-
-			It("returns the error", func() {
-				err := container.CopyIn("/src", "/dst")
-				Expect(err).To(Equal(nastyError))
 			})
 		})
 	})
 
-	Describe("Copying out", func() {
-		var destination string
+	Describe("Streaming out", func() {
+		var destination *bytes.Buffer
 
 		BeforeEach(func() {
-			var err error
-
-			destination, err = ioutil.TempDir("", "copy-out-destination")
-			Ω(err).ShouldNot(HaveOccurred())
-
-			err = os.RemoveAll(destination)
-			Ω(err).ShouldNot(HaveOccurred())
-
-			destination = filepath.Join(destination, "some-destination")
+			destination = new(bytes.Buffer)
 		})
 
-		AfterEach(func() {
-			os.RemoveAll(destination)
-		})
-
-		It("creates the destination directory and rsyncs from vcap@container:/src to it", func() {
-			err := container.CopyOut("/src", destination, "")
-			Expect(err).ToNot(HaveOccurred())
-
-			_, err = os.Stat(destination)
-			Expect(err).To(HaveOccurred())
-
-			_, err = os.Stat(filepath.Dir(destination))
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(fakeRunner).To(HaveExecutedSerially(
+		It("streams the output of tar cf to the destination", func() {
+			fakeRunner.WhenRunning(
 				fake_command_runner.CommandSpec{
-					Path: "rsync",
+					Path: "/depot/some-id/bin/wsh",
 					Args: []string{
-						"-e",
-						"/depot/some-id/bin/wsh --socket /depot/some-id/run/wshd.sock --rsh",
-						"-r",
-						"-p",
-						"--links",
-						"vcap@container:/src",
-						destination,
+						"--socket", "/depot/some-id/run/wshd.sock",
+						"--user", "vcap",
+						"tar", "cf", "-", "-C", "/some/directory", "dst",
 					},
 				},
-			))
+				func(cmd *exec.Cmd) error {
+					go cmd.Stdout.Write([]byte("the-compressed-content"))
+					return nil
+				},
+			)
+
+			reader, err := container.StreamOut("/some/directory/dst")
+			Expect(err).ToNot(HaveOccurred())
+
+			bytes, err := ioutil.ReadAll(reader)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(bytes)).To(Equal("the-compressed-content"))
 		})
 
-		Context("when an owner is given", func() {
-			It("chowns the files after rsyncing", func() {
-				err := container.CopyOut("/src", destination, "some-user")
+		Context("when there's a trailing slash", func() {
+			It("compresses the directory's contents", func() {
+				_, err := container.StreamOut("/some/directory/dst/")
 				Expect(err).ToNot(HaveOccurred())
 
-				Expect(fakeRunner).To(HaveExecutedSerially(
+				Expect(fakeRunner).To(HaveBackgrounded(
 					fake_command_runner.CommandSpec{
-						Path: "rsync",
-					},
-					fake_command_runner.CommandSpec{
-						Path: "chown",
-						Args: []string{"-R", "some-user", destination},
+						Path: "/depot/some-id/bin/wsh",
+						Args: []string{
+							"--socket", "/depot/some-id/run/wshd.sock",
+							"--user", "vcap",
+							"tar", "cf", "-", "-C", "/some/directory/dst/", ".",
+						},
 					},
 				))
 			})
 		})
 
-		Context("when rsync fails", func() {
-			nastyError := errors.New("oh no!")
+		Context("when executing the command fails", func() {
+			disaster := errors.New("oh no!")
 
 			BeforeEach(func() {
 				fakeRunner.WhenRunning(
 					fake_command_runner.CommandSpec{
-						Path: "rsync",
+						Path: "/depot/some-id/bin/wsh",
 					}, func(*exec.Cmd) error {
-						return nastyError
+						return disaster
 					},
 				)
 			})
 
 			It("returns the error", func() {
-				err := container.CopyOut("/src", destination, "")
-				Expect(err).To(Equal(nastyError))
-			})
-		})
-
-		Context("when chowning fails", func() {
-			nastyError := errors.New("oh no!")
-
-			BeforeEach(func() {
-				fakeRunner.WhenRunning(
-					fake_command_runner.CommandSpec{
-						Path: "chown",
-					}, func(*exec.Cmd) error {
-						return nastyError
-					},
-				)
-			})
-
-			It("returns the error", func() {
-				err := container.CopyOut("/src", destination, "some-user")
-				Expect(err).To(Equal(nastyError))
+				_, err := container.StreamOut("/some/dst")
+				Expect(err).To(Equal(disaster))
 			})
 		})
 	})
@@ -928,15 +885,11 @@ var _ = Describe("Linux containers", func() {
 					Sigpending: uint64ptr(14),
 					Stack:      uint64ptr(15),
 				},
-				EnvironmentVariables: []warden.EnvironmentVariable{
-					warden.EnvironmentVariable{Key: "ELEPHANT", Value: "charlie sheen"},
-					warden.EnvironmentVariable{Key: "AARDVARK", Value: "bartholomew"},
-				},
 			})
 
 			Expect(err).ToNot(HaveOccurred())
 
-			Eventually(fakeRunner).Should(HaveStartedExecuting(
+			Eventually(fakeRunner).Should(HaveBackgrounded(
 				fake_command_runner.CommandSpec{
 					Path: "/depot/some-id/bin/iomux-spawn",
 					Args: []string{
@@ -946,7 +899,7 @@ var _ = Describe("Linux containers", func() {
 						"--user", "vcap",
 						"/bin/bash",
 					},
-					Stdin: "export ELEPHANT=\"charlie sheen\"\nexport AARDVARK=\"bartholomew\"\n/some/script",
+					Stdin: "/some/script",
 					Env: []string{
 						"RLIMIT_AS=1",
 						"RLIMIT_CORE=2",
@@ -964,6 +917,39 @@ var _ = Describe("Linux containers", func() {
 						"RLIMIT_SIGPENDING=14",
 						"RLIMIT_STACK=15",
 					},
+				},
+			))
+		})
+
+		It("runs the script with escaped environment variables", func() {
+			setupSuccessfulSpawn()
+
+			processID, _, err := container.Run(warden.ProcessSpec{
+				Script: "/some/script",
+				EnvironmentVariables: []warden.EnvironmentVariable{
+					warden.EnvironmentVariable{Key: "ESCAPED", Value: "kurt \"russell\""},
+					warden.EnvironmentVariable{Key: "INTERPOLATED", Value: "snake $PLISSKEN"},
+					warden.EnvironmentVariable{Key: "UNESCAPED", Value: "isaac\nhayes"},
+				},
+			})
+
+			Expect(err).ToNot(HaveOccurred())
+
+			Eventually(fakeRunner).Should(HaveBackgrounded(
+				fake_command_runner.CommandSpec{
+					Path: "/depot/some-id/bin/iomux-spawn",
+					Args: []string{
+						fmt.Sprintf("/depot/some-id/processes/%d", processID),
+						"/depot/some-id/bin/wsh",
+						"--socket", "/depot/some-id/run/wshd.sock",
+						"--user", "vcap",
+						"/bin/bash",
+					},
+					Stdin: `export ESCAPED="kurt \"russell\""
+export INTERPOLATED="snake $PLISSKEN"
+export UNESCAPED="isaac
+hayes"
+/some/script`,
 				},
 			))
 		})
@@ -1042,7 +1028,7 @@ var _ = Describe("Linux containers", func() {
 
 				Expect(err).ToNot(HaveOccurred())
 
-				Eventually(fakeRunner).Should(HaveStartedExecuting(
+				Eventually(fakeRunner).Should(HaveBackgrounded(
 					fake_command_runner.CommandSpec{
 						Path: "/depot/some-id/bin/iomux-spawn",
 						Args: []string{
@@ -1095,7 +1081,7 @@ var _ = Describe("Linux containers", func() {
 
 				Expect(err).ToNot(HaveOccurred())
 
-				Eventually(fakeRunner).Should(HaveStartedExecuting(
+				Eventually(fakeRunner).Should(HaveBackgrounded(
 					fake_command_runner.CommandSpec{
 						Path: "/depot/some-id/bin/iomux-spawn",
 						Args: []string{
@@ -1855,6 +1841,13 @@ var _ = Describe("Linux containers", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(info.Events).To(Equal([]string{}))
+		})
+
+		It("returns the container's properties", func() {
+			info, err := container.Info()
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(info.Properties).To(Equal(container.Properties()))
 		})
 
 		It("returns the container's network info", func() {

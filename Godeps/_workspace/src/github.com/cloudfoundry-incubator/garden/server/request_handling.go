@@ -1,8 +1,12 @@
 package server
 
 import (
+	"bufio"
+	"io"
 	"net"
 	"time"
+
+	"github.com/cloudfoundry-incubator/garden/transport"
 
 	"code.google.com/p/gogoprotobuf/proto"
 
@@ -16,6 +20,18 @@ func (s *WardenServer) handlePing(ping *protocol.PingRequest) (proto.Message, er
 
 func (s *WardenServer) handleEcho(echo *protocol.EchoRequest) (proto.Message, error) {
 	return &protocol.EchoResponse{Message: echo.Message}, nil
+}
+
+func (s *WardenServer) handleCapacity(echo *protocol.CapacityRequest) (proto.Message, error) {
+	capacity, err := s.backend.Capacity()
+	if err != nil {
+		return nil, err
+	}
+
+	return &protocol.CapacityResponse{
+		MemoryInBytes: proto.Uint64(capacity.MemoryInBytes),
+		DiskInBytes:   proto.Uint64(capacity.DiskInBytes),
+	}, nil
 }
 
 func (s *WardenServer) handleCreate(create *protocol.CreateRequest) (proto.Message, error) {
@@ -97,28 +113,6 @@ func (s *WardenServer) handleList(list *protocol.ListRequest) (proto.Message, er
 	return &protocol.ListResponse{Handles: handles}, nil
 }
 
-func (s *WardenServer) handleCopyOut(copyOut *protocol.CopyOutRequest) (proto.Message, error) {
-	handle := copyOut.GetHandle()
-	srcPath := copyOut.GetSrcPath()
-	dstPath := copyOut.GetDstPath()
-	owner := copyOut.GetOwner()
-
-	container, err := s.backend.Lookup(handle)
-	if err != nil {
-		return nil, err
-	}
-
-	s.bomberman.Pause(container.Handle())
-	defer s.bomberman.Unpause(container.Handle())
-
-	err = container.CopyOut(srcPath, dstPath, owner)
-	if err != nil {
-		return nil, err
-	}
-
-	return &protocol.CopyOutResponse{}, nil
-}
-
 func (s *WardenServer) handleStop(request *protocol.StopRequest) (proto.Message, error) {
 	handle := request.GetHandle()
 	kill := request.GetKill()
@@ -144,10 +138,9 @@ func (s *WardenServer) handleStop(request *protocol.StopRequest) (proto.Message,
 	return &protocol.StopResponse{}, nil
 }
 
-func (s *WardenServer) handleCopyIn(copyIn *protocol.CopyInRequest) (proto.Message, error) {
-	handle := copyIn.GetHandle()
-	srcPath := copyIn.GetSrcPath()
-	dstPath := copyIn.GetDstPath()
+func (s *WardenServer) handleStreamIn(conn net.Conn, reader *bufio.Reader, request *protocol.StreamInRequest) (proto.Message, error) {
+	handle := request.GetHandle()
+	dstPath := request.GetDstPath()
 
 	container, err := s.backend.Lookup(handle)
 	if err != nil {
@@ -157,12 +150,56 @@ func (s *WardenServer) handleCopyIn(copyIn *protocol.CopyInRequest) (proto.Messa
 	s.bomberman.Pause(container.Handle())
 	defer s.bomberman.Unpause(container.Handle())
 
-	err = container.CopyIn(srcPath, dstPath)
+	streamWriter, err := container.StreamIn(dstPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return &protocol.CopyInResponse{}, nil
+	_, err = protocol.Messages(&protocol.StreamInResponse{}).WriteTo(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	streamReader := transport.NewProtobufStreamReader(reader)
+
+	_, err = io.Copy(streamWriter, streamReader)
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, streamWriter.Close()
+}
+
+func (s *WardenServer) handleStreamOut(conn net.Conn, request *protocol.StreamOutRequest) (proto.Message, error) {
+	handle := request.GetHandle()
+	srcPath := request.GetSrcPath()
+
+	container, err := s.backend.Lookup(handle)
+	if err != nil {
+		return nil, err
+	}
+
+	s.bomberman.Pause(container.Handle())
+	defer s.bomberman.Unpause(container.Handle())
+
+	_, err = protocol.Messages(&protocol.StreamOutResponse{}).WriteTo(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	writer := transport.NewProtobufStreamWriter(conn)
+
+	reader, err := container.StreamOut(srcPath)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = io.Copy(writer, reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, writer.Close()
 }
 
 func (s *WardenServer) handleLimitBandwidth(request *protocol.LimitBandwidthRequest) (proto.Message, error) {

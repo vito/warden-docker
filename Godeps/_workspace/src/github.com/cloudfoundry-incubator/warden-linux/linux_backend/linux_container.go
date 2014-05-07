@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,6 +366,7 @@ func (c *LinuxContainer) Info() (warden.ContainerInfo, error) {
 	return warden.ContainerInfo{
 		State:         string(c.State()),
 		Events:        c.Events(),
+		Properties:    c.Properties(),
 		HostIP:        c.resources.Network.HostIP().String(),
 		ContainerIP:   c.resources.Network.ContainerIP().String(),
 		ContainerPath: c.path,
@@ -377,51 +378,73 @@ func (c *LinuxContainer) Info() (warden.ContainerInfo, error) {
 	}, nil
 }
 
-func (c *LinuxContainer) CopyIn(src, dst string) error {
-	log.Println(c.id, "copying in from", src, "to", dst)
+func (c *LinuxContainer) StreamIn(dstPath string) (io.WriteCloser, error) {
+	log.Println(c.id, "writing data to:", dstPath)
 
 	wshPath := path.Join(c.path, "bin", "wsh")
 	sockPath := path.Join(c.path, "run", "wshd.sock")
 
-	wsh := &exec.Cmd{
+	tarRead, tarWrite := io.Pipe()
+
+	tar := &exec.Cmd{
 		Path: wshPath,
-		Args: []string{"--socket", sockPath, "--user", "vcap", "mkdir", "-p", path.Dir(dst)},
+		Args: []string{
+			"--socket", sockPath,
+			"--user", "vcap",
+			"bash", "-c",
+			fmt.Sprintf("mkdir -p %s && tar xf - -C %s", dstPath, dstPath),
+		},
+		Stdin: tarRead,
 	}
 
-	err := c.runner.Run(wsh)
+	err := c.runner.Background(tar)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return c.rsync(src, "vcap@container:"+dst)
+	go c.runner.Wait(tar)
+
+	return tarWrite, nil
 }
 
-func (c *LinuxContainer) CopyOut(src, dst, owner string) error {
-	err := os.MkdirAll(path.Dir(dst), 0755)
+func (c *LinuxContainer) StreamOut(srcPath string) (io.Reader, error) {
+	log.Println(c.id, "reading data from:", srcPath)
+
+	wshPath := path.Join(c.path, "bin", "wsh")
+	sockPath := path.Join(c.path, "run", "wshd.sock")
+
+	workingDir := filepath.Dir(srcPath)
+	compressArg := filepath.Base(srcPath)
+	if strings.HasSuffix(srcPath, "/") {
+		workingDir = srcPath
+		compressArg = "."
+	}
+
+	tarRead, tarWrite := io.Pipe()
+
+	tar := &exec.Cmd{
+		Path: wshPath,
+		Args: []string{
+			"--socket", sockPath,
+			"--user", "vcap",
+			"tar", "cf", "-", "-C", workingDir, compressArg,
+		},
+		Stdout: tarWrite,
+	}
+
+	log.Println("STARTING", tar)
+
+	err := c.runner.Background(tar)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	log.Println(c.id, "copying out from", src, "to", dst)
+	go func() {
+		c.runner.Wait(tar)
+		tarWrite.Close()
+	}()
 
-	err = c.rsync("vcap@container:"+src, dst)
-	if err != nil {
-		return err
-	}
-
-	if owner != "" {
-		chown := &exec.Cmd{
-			Path: "chown",
-			Args: []string{"-R", owner, dst},
-		}
-
-		err := c.runner.Run(chown)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return tarRead, nil
 }
 
 func (c *LinuxContainer) LimitBandwidth(limits warden.BandwidthLimits) error {
@@ -551,10 +574,6 @@ func (c *LinuxContainer) CurrentCPULimits() (warden.CPULimits, error) {
 	}
 
 	return warden.CPULimits{uint64(numericLimit)}, nil
-}
-
-func exportCommand(env warden.EnvironmentVariable) string {
-	return fmt.Sprintf("export %s=%q\n", env.Key, env.Value)
 }
 
 func (c *LinuxContainer) Run(spec warden.ProcessSpec) (uint32, <-chan warden.ProcessStream, error) {
@@ -695,25 +714,6 @@ func (c *LinuxContainer) registerEvent(event string) {
 	defer c.eventsMutex.Unlock()
 
 	c.events = append(c.events, event)
-}
-
-func (c *LinuxContainer) rsync(src, dst string) error {
-	wshPath := path.Join(c.path, "bin", "wsh")
-	sockPath := path.Join(c.path, "run", "wshd.sock")
-
-	rsync := &exec.Cmd{
-		Path: "rsync",
-		Args: []string{
-			"-e", wshPath + " --socket " + sockPath + " --rsh",
-			"-r",
-			"-p",
-			"--links",
-			src,
-			dst,
-		},
-	}
-
-	return c.runner.Run(rsync)
 }
 
 func (c *LinuxContainer) startOomNotifier() error {
@@ -938,4 +938,12 @@ func setRLimitsEnv(cmd *exec.Cmd, rlimits warden.ResourceLimits) {
 	if rlimits.Stack != nil {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("RLIMIT_STACK=%d", *rlimits.Stack))
 	}
+}
+
+func exportCommand(env warden.EnvironmentVariable) string {
+	return fmt.Sprintf("export %s=\"%s\"\n", env.Key, escapeQuotes(env.Value))
+}
+
+func escapeQuotes(value string) string {
+	return strings.Replace(value, `"`, `\"`, -1)
 }
