@@ -198,7 +198,7 @@ func main() {
 		*binPath,
 		*depotPath,
 		*rootFSPath,
-		repository_fetcher.New(reg, graph),
+		repository_fetcher.Retryable{repository_fetcher.New(reg, graph)},
 		graphDriver,
 		uidPool,
 		networkPool,
