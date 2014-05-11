@@ -363,6 +363,15 @@ func (p *LinuxContainerPool) Destroy(container linux_backend.Container) error {
 	return nil
 }
 
+func (p *LinuxContainerPool) MaxContainers() int {
+	maxNet := p.networkPool.InitialSize()
+	maxUid := p.uidPool.InitialSize()
+	if maxNet < maxUid {
+		return maxNet
+	}
+	return maxUid
+}
+
 func (p *LinuxContainerPool) destroy(id string) error {
 	destroy := &exec.Cmd{
 		Path: path.Join(p.binPath, "destroy.sh"),
